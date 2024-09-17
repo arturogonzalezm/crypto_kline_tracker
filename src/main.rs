@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use futures_util::StreamExt;
+use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -77,9 +78,9 @@ async fn run_websocket(
         symbol, interval
     );
 
-    println!("Connecting to Binance WebSocket for {} {}...", symbol, interval);
+    info!("Connecting to Binance WebSocket for {} {}...", symbol, interval);
     let (ws_stream, _) = connect_async(&ws_url).await?;
-    println!("Connected to WebSocket for {} {}.", symbol, interval);
+    info!("Connected to WebSocket for {} {}.", symbol, interval);
 
     let (_, mut read) = ws_stream.split();
 
@@ -90,15 +91,17 @@ async fn run_websocket(
                 let kline_data =
                     KlineData::new(symbol.clone(), interval.clone(), &json["k"])?;
                 tx.send(kline_data).await?;
+                debug!("Sent kline data for {} {}", symbol, interval);
             }
         }
     }
+    warn!("WebSocket connection closed for {} {}", symbol, interval);
     Ok(())
 }
 
 fn process_kline_data(kline_data: &KlineData) {
     let local_time = Local::now();
-    println!(
+    info!(
         "Symbol: {} | Interval: {} | Local time: {} | Interval start: {} | \
          Open: {:.2} | High: {:.2} | Low: {:.2} | Close: {:.2} | \
          Volume: {:.2} | Change: {:.2} ({:.2}%)",
@@ -124,14 +127,14 @@ fn spawn_websocket_tasks(
     symbols
         .iter()
         .flat_map(|&symbol| {
-            let tx = tx.clone(); // Clone tx here
+            let tx = tx.clone();
             intervals.iter().map(move |&interval| {
                 let symbol = symbol.to_string();
                 let interval = interval.to_string();
-                let tx = tx.clone(); // Clone tx again for each task
+                let tx = tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = run_websocket(symbol, interval, tx).await {
-                        eprintln!("WebSocket error: {}", e);
+                    if let Err(e) = run_websocket(symbol.clone(), interval.clone(), tx).await {
+                        error!("WebSocket error for {} {}: {}", symbol, interval, e);
                     }
                 })
             })
@@ -158,14 +161,19 @@ async fn process_kline_stream(mut rx: mpsc::Receiver<KlineData>) {
             .sum::<f64>()
             / kline_cache.len() as f64;
 
-        println!("Average price change across all symbols: {:.2}%", avg_price_change);
+        info!("Average price change across all symbols: {:.2}%", avg_price_change);
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+
     let symbols = &["btcusdt", "ethusdt", "bnbusdt", "adausdt", "dogeusdt"];
     let intervals = &["1m", "5m", "15m"];
+
+    info!("Starting Binance WebSocket client");
+    debug!("Symbols: {:?}, Intervals: {:?}", symbols, intervals);
 
     let (tx, rx) = mpsc::channel(100);
 
@@ -178,5 +186,6 @@ async fn main() -> Result<()> {
 
     processor.await?;
 
+    info!("Binance WebSocket client shutting down");
     Ok(())
 }
