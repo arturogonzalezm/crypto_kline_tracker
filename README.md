@@ -6,7 +6,7 @@ This is a distributed and parallel Rust application that connects to the Binance
 
 - Connects to multiple Binance WebSocket streams concurrently
 - Processes kline (candlestick) data for various cryptocurrency pairs and time intervals
-- Utilizes parallel processing for data handling
+- Utilises parallel processing for data handling
 - Implements comprehensive logging for better debugging and monitoring
 - Calculates and displays average price changes across all tracked symbols
 
@@ -84,7 +84,7 @@ sequenceDiagram
     participant DataProcessor
     participant Logger
 
-    Main->>Logger: Initialize
+    Main->>Logger: Initialise
     Main->>WebSocketTasks: Spawn tasks for each symbol/interval
     loop For each symbol/interval pair
         WebSocketTasks->>BinanceWS: Connect to WebSocket
@@ -113,7 +113,7 @@ Logging is implemented using the `log` and `env_logger` crates. You can adjust t
 ## Performance Considerations
 
 - The application uses Tokio for asynchronous I/O, allowing it to handle multiple WebSocket connections efficiently.
-- Rayon is used for parallel processing of the received data, utilizing multiple CPU cores when available.
+- Rayon is used for parallel processing of the received data, utilising multiple CPU cores when available.
 - Be mindful of the number of symbols and intervals you're tracking, as each combination creates a separate WebSocket connection.
 
 ## Contributing
