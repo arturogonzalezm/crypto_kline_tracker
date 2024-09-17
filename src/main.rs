@@ -106,6 +106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Wait for 100 milliseconds before the next request
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(100)).await;
     }
 }
