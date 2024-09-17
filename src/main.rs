@@ -1,9 +1,8 @@
-use reqwest;
+use futures_util::{StreamExt};
 use serde_json::Value;
-use chrono::{DateTime, Utc, TimeZone, Local};
-use tokio::time::{sleep, Instant};
-use std::time::Duration;
-use anyhow::{Result, anyhow};
+use tokio_tungstenite::connect_async;
+use chrono::{DateTime, Utc, Local, TimeZone};  // Import TimeZone for timestamp methods
+use anyhow::{Result, anyhow};  // For improved error handling
 
 #[derive(Debug, Clone, Copy)]
 struct KlineData {
@@ -16,19 +15,20 @@ struct KlineData {
 }
 
 impl KlineData {
-    fn new(kline: &[Value]) -> Result<Self> {
-        let interval_start = match Utc.timestamp_millis_opt(kline[0].as_i64().ok_or_else(|| anyhow!("Failed to parse interval start"))?) {
+    // Improved error handling using `Result`
+    fn new(kline: &Value) -> Result<Self> {
+        let interval_start = match Utc.timestamp_millis_opt(kline["t"].as_i64().ok_or_else(|| anyhow!("Invalid timestamp"))?) {
             chrono::LocalResult::Single(datetime) => datetime,
-            _ => Utc::now(),
+            _ => Utc::now(), // Fallback to current time if parsing fails
         };
 
         Ok(Self {
             interval_start,
-            open: kline[1].as_str().ok_or_else(|| anyhow!("Failed to parse open value"))?.parse().map_err(|_| anyhow!("Invalid open value"))?,
-            high: kline[2].as_str().ok_or_else(|| anyhow!("Failed to parse high value"))?.parse().map_err(|_| anyhow!("Invalid high value"))?,
-            low: kline[3].as_str().ok_or_else(|| anyhow!("Failed to parse low value"))?.parse().map_err(|_| anyhow!("Invalid low value"))?,
-            close: kline[4].as_str().ok_or_else(|| anyhow!("Failed to parse close value"))?.parse().map_err(|_| anyhow!("Invalid close value"))?,
-            volume: kline[5].as_str().ok_or_else(|| anyhow!("Failed to parse volume value"))?.parse().map_err(|_| anyhow!("Invalid volume value"))?,
+            open: kline["o"].as_str().ok_or_else(|| anyhow!("Invalid open price"))?.parse().map_err(|_| anyhow!("Failed to parse open price"))?,
+            high: kline["h"].as_str().ok_or_else(|| anyhow!("Invalid high price"))?.parse().map_err(|_| anyhow!("Failed to parse high price"))?,
+            low: kline["l"].as_str().ok_or_else(|| anyhow!("Invalid low price"))?.parse().map_err(|_| anyhow!("Failed to parse low price"))?,
+            close: kline["c"].as_str().ok_or_else(|| anyhow!("Invalid close price"))?.parse().map_err(|_| anyhow!("Failed to parse close price"))?,
+            volume: kline["v"].as_str().ok_or_else(|| anyhow!("Invalid volume"))?.parse().map_err(|_| anyhow!("Failed to parse volume"))?,
         })
     }
 
@@ -39,93 +39,55 @@ impl KlineData {
     fn price_change_percent(&self) -> f64 {
         (self.price_change() / self.open) * 100.0
     }
-
-    fn has_significant_change(&self, other: &KlineData, threshold: f64) -> bool {
-        (self.close - other.close).abs() > threshold || (self.volume - other.volume).abs() > threshold
-    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let symbol = "BTCUSDT";
+    let symbol = "btcusdt";
     let interval = "1m";
-    let price_change_threshold = 0.01;  // Change threshold for triggering updates
-
-    let url = format!(
-        "https://api.binance.com/api/v3/klines?symbol={}&interval={}&limit=1",
+    let ws_url = format!(
+        "wss://stream.binance.com:9443/ws/{}@kline_{}",
         symbol, interval
     );
 
-    let client = reqwest::Client::new();
+    println!("Connecting to Binance WebSocket for {}...", symbol);
 
-    println!("Starting high-frequency data retrieval for {}...", symbol);
-    println!("Press Ctrl+C to stop the program.");
+    // Connect to WebSocket and ensure no unnecessary delays
+    let (ws_stream, _) = connect_async(ws_url.as_str()).await?;
+    println!("Connected to WebSocket.");
 
-    let mut last_kline: Option<KlineData> = None;
-    let mut requests_count = 0;
-    let mut updates_count = 0;
-    let start_time = Instant::now();
+    let (mut _write, mut read) = ws_stream.split();
 
-    loop {
-        match client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    let body: Value = response.json().await?;
+    while let Some(Ok(message)) = read.next().await {
+        if let Ok(text) = message.to_text() {
+            let json: Value = serde_json::from_str(text)?;
 
-                    if let Some(klines) = body.as_array() {
-                        if let Some(kline) = klines.first() {
-                            if let Some(kline_array) = kline.as_array() {
-                                if let Ok(kline_data) = KlineData::new(kline_array) {
-                                    let local_time = Local::now();
+            if let Some(_kline) = json["k"].as_object() {
+                match KlineData::new(&json["k"]) {
+                    Ok(kline_data) => {
+                        let local_time = Local::now();
 
-                                    // Only update if there is a significant change
-                                    if last_kline.map_or(true, |last| kline_data.has_significant_change(&last, price_change_threshold)) {
-                                        updates_count += 1;
-                                        let is_new_interval = last_kline.map_or(true, |last| last.interval_start != kline_data.interval_start);
-
-                                        if is_new_interval {
-                                            println!("\nNew interval starting:");
-                                            updates_count = 1;
-                                        }
-
-                                        println!(
-                                            "Local time: {} | Interval start: {} | Open: {:.2} | High: {:.2} | Low: {:.2} | Close: {:.2} | Volume: {:.2} | Change: {:.2} ({:.2}%) | Updates: {}",
-                                            local_time.format("%Y-%m-%d %H:%M:%S"),
-                                            kline_data.interval_start.format("%Y-%m-%d %H:%M"),
-                                            kline_data.open,
-                                            kline_data.high,
-                                            kline_data.low,
-                                            kline_data.close,
-                                            kline_data.volume,
-                                            kline_data.price_change(),
-                                            kline_data.price_change_percent(),
-                                            updates_count
-                                        );
-
-                                        last_kline = Some(kline_data);
-                                    }
-                                } else {
-                                    println!("Error parsing Kline data");
-                                }
-                            }
-                        }
+                        // Ensure minimal delay in processing and logging
+                        println!(
+                            "Local time: {} | Interval start: {} | Open: {:.2} | High: {:.2} | Low: {:.2} | Close: {:.2} | Volume: {:.2} | Change: {:.2} ({:.2}%)",
+                            local_time.format("%Y-%m-%d %H:%M:%S"),
+                            kline_data.interval_start.format("%Y-%m-%d %H:%M"),
+                            kline_data.open,
+                            kline_data.high,
+                            kline_data.low,
+                            kline_data.close,
+                            kline_data.volume,
+                            kline_data.price_change(),
+                            kline_data.price_change_percent(),
+                        );
                     }
-                } else {
-                    println!("Error: {}", response.status());
+                    Err(e) => {
+                        eprintln!("Error parsing kline data: {}", e);
+                    }
                 }
             }
-            Err(err) => {
-                println!("Request failed: {}", err);
-            }
         }
-
-        requests_count += 1;
-        if requests_count % 100 == 0 {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            println!("\nAverage request rate: {:.2} requests/second", requests_count as f64 / elapsed);
-        }
-
-        // Wait before the next request, possibly adjust dynamically if needed
-        sleep(Duration::from_millis(200)).await;
     }
+
+    Ok(())
 }
