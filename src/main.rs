@@ -3,9 +3,9 @@ use serde_json::Value;
 use chrono::{DateTime, Utc, TimeZone, Local};
 use tokio::time::{sleep, Instant};
 use std::time::Duration;
-use anyhow::{Result, anyhow};  // Improved error handling with anyhow
+use anyhow::{Result, anyhow};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct KlineData {
     interval_start: DateTime<Utc>,
     open: f64,
@@ -17,8 +17,13 @@ struct KlineData {
 
 impl KlineData {
     fn new(kline: &[Value]) -> Result<Self> {
+        let interval_start = match Utc.timestamp_millis_opt(kline[0].as_i64().ok_or_else(|| anyhow!("Failed to parse interval start"))?) {
+            chrono::LocalResult::Single(datetime) => datetime,
+            _ => Utc::now(),
+        };
+
         Ok(Self {
-            interval_start: Utc.timestamp_millis_opt(kline[0].as_i64().ok_or_else(|| anyhow!("Failed to parse interval start"))?).unwrap(),
+            interval_start,
             open: kline[1].as_str().ok_or_else(|| anyhow!("Failed to parse open value"))?.parse().map_err(|_| anyhow!("Invalid open value"))?,
             high: kline[2].as_str().ok_or_else(|| anyhow!("Failed to parse high value"))?.parse().map_err(|_| anyhow!("Invalid high value"))?,
             low: kline[3].as_str().ok_or_else(|| anyhow!("Failed to parse low value"))?.parse().map_err(|_| anyhow!("Invalid low value"))?,
@@ -34,12 +39,17 @@ impl KlineData {
     fn price_change_percent(&self) -> f64 {
         (self.price_change() / self.open) * 100.0
     }
+
+    fn has_significant_change(&self, other: &KlineData, threshold: f64) -> bool {
+        (self.close - other.close).abs() > threshold || (self.volume - other.volume).abs() > threshold
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let symbol = "BTCUSDT";
     let interval = "1m";
+    let price_change_threshold = 0.01;  // Change threshold for triggering updates
 
     let url = format!(
         "https://api.binance.com/api/v3/klines?symbol={}&interval={}&limit=1",
@@ -48,7 +58,7 @@ async fn main() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    println!("Starting comprehensive high-frequency data retrieval for {}...", symbol);
+    println!("Starting high-frequency data retrieval for {}...", symbol);
     println!("Press Ctrl+C to stop the program.");
 
     let mut last_kline: Option<KlineData> = None;
@@ -68,9 +78,10 @@ async fn main() -> Result<()> {
                                 if let Ok(kline_data) = KlineData::new(kline_array) {
                                     let local_time = Local::now();
 
-                                    if last_kline.as_ref().map_or(true, |last| last.close != kline_data.close) {
+                                    // Only update if there is a significant change
+                                    if last_kline.map_or(true, |last| kline_data.has_significant_change(&last, price_change_threshold)) {
                                         updates_count += 1;
-                                        let is_new_interval = last_kline.as_ref().map_or(true, |last| last.interval_start != kline_data.interval_start);
+                                        let is_new_interval = last_kline.map_or(true, |last| last.interval_start != kline_data.interval_start);
 
                                         if is_new_interval {
                                             println!("\nNew interval starting:");
@@ -114,7 +125,7 @@ async fn main() -> Result<()> {
             println!("\nAverage request rate: {:.2} requests/second", requests_count as f64 / elapsed);
         }
 
-        // Adjust the sleep interval dynamically if needed based on the rate limits
-        sleep(Duration::from_millis(100)).await;
+        // Wait before the next request, possibly adjust dynamically if needed
+        sleep(Duration::from_millis(200)).await;
     }
 }
