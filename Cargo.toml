@@ -13,3 +13,4 @@ crossterm = "0.28.1"
 serde_json = "1.0.128"
 reqwest = { version = "0.12.7", features = ["json"] }
 chrono = "0.4.38"
+anyhow = "1.0.89"
